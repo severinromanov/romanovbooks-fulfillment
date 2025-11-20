@@ -38,7 +38,7 @@ export default async function handler(req, res) {
       await handleCheckoutSessionCompleted(session);
     } catch (err) {
       console.error('Error handling checkout session:', err);
-      // We still reply 200 so Stripe doesn't keep retrying forever
+      // still return 200 so Stripe doesn't hammer retries
     }
   }
 
@@ -54,6 +54,7 @@ async function handleCheckoutSessionCompleted(session) {
     return;
   }
 
+  // Destination address from Stripe
   const addressTo = {
     name: customerDetails?.name || '',
     street1: shippingDetails.address.line1 || '',
@@ -65,6 +66,7 @@ async function handleCheckoutSessionCompleted(session) {
     email: customerDetails?.email || '',
   };
 
+  // Origin address from env vars
   const addressFrom = {
     name: process.env.FROM_NAME,
     street1: process.env.FROM_STREET,
@@ -75,24 +77,33 @@ async function handleCheckoutSessionCompleted(session) {
     email: process.env.FROM_EMAIL,
   };
 
-  // Parcel for Annick's book (adjust if needed)
-  const parcel = {
-    length: 9,
-    width: 6,
-    height: 1,
-    distance_unit: 'in',
-    weight: 12,
-    mass_unit: 'oz',
-  };
-
-  // 1️⃣ Create shipment in Shippo
-  const shipmentResponse = await axios.post(
-    'https://api.goshippo.com/shipments/',
+  // Basic line item for the book
+  const lineItems = [
     {
-      address_from: addressFrom,
-      address_to: addressTo,
-      parcels: [parcel],
-      async: false,
+      title: "Annick & Luca's Adventure – The Beetle in the Blossom",
+      quantity: 1,
+      sku: 'BOOK-ANNICK-001',
+      total_price: (session.amount_total / 100).toFixed(2), // Stripe amounts are in cents
+      currency: session.currency || 'usd',
+      weight: 12,
+      weight_unit: 'oz',
+    },
+  ];
+
+  // Create an ORDER in Shippo (no labels purchased here)
+  const orderResponse = await axios.post(
+    'https://api.goshippo.com/orders/',
+    {
+      to_address: addressTo,
+      from_address: addressFrom,
+      line_items: lineItems,
+      order_number: session.id, // you can change this to your own internal order number
+      placed_at: session.created
+        ? new Date(session.created * 1000).toISOString()
+        : undefined,
+      currency: session.currency || 'usd',
+      weight: 12,
+      weight_unit: 'oz',
     },
     {
       headers: {
@@ -102,55 +113,16 @@ async function handleCheckoutSessionCompleted(session) {
     }
   );
 
-  const shipment = shipmentResponse.data;
+  const order = orderResponse.data;
 
-  if (!shipment.rates || shipment.rates.length === 0) {
-    console.error('No rates returned by Shippo for session', session.id);
-    return;
-  }
+  console.log('Shippo order created:', order.object_id);
 
-  // 2️⃣ Pick the cheapest rate for now
-  const cheapestRate = shipment.rates.reduce((prev, current) =>
-    parseFloat(current.amount) < parseFloat(prev.amount) ? current : prev
-  );
-
-  // 3️⃣ Buy label
-  const transactionResponse = await axios.post(
-    'https://api.goshippo.com/transactions/',
-    {
-      rate: cheapestRate.object_id,
-      label_file_type: 'PDF',
-    },
-    {
-      headers: {
-        Authorization: `ShippoToken ${process.env.SHIPPO_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    }
-  );
-
-  const transaction = transactionResponse.data;
-
-  if (transaction.status !== 'SUCCESS') {
-    console.error('Shippo label purchase failed', transaction);
-    return;
-  }
-
-  const labelUrl = transaction.label_url;
-  const trackingNumber = transaction.tracking_number;
-  const trackingUrl = transaction.tracking_url_provider;
-
-  console.log('Label created:', labelUrl, trackingNumber, trackingUrl);
-
-  // 4️⃣ Save tracking info into Stripe so you can see it on the Payment
+  // Optional: store Shippo order ID back in Stripe metadata for cross-reference
   if (session.payment_intent) {
     await stripe.paymentIntents.update(session.payment_intent, {
       metadata: {
-        shipping_label_url: labelUrl,
-        tracking_number: trackingNumber,
-        tracking_url: trackingUrl,
+        shippo_order_id: order.object_id,
       },
     });
   }
 }
-
