@@ -1,0 +1,13 @@
+{
+  "name": "romanovbooks-fulfillment",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node api/webhook.js"
+  },
+  "dependencies": {
+    "stripe": "^14.0.0",
+    "axios": "^1.6.0",
+    "raw-body": "^2.5.2"
+  }
+}
+
